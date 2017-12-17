@@ -51,54 +51,48 @@ def file_pad_lines(filename):
     shutil.move(filename_pad, filename)
 
 
-def disk_get(filename, key):
+def disk_get(fh, key):
     """
     Traverse a text file containing a disk_save() BTree and return the value
     for key or None if the key is not found
     """
     seek_count = 0
 
-    with open(filename, 'r') as fh:
+    fh.seek(0)
 
-        # Read the first line to determine the line width and load the root node
-        line = next(fh)
-        line_width = len(line)
+    # Read the first line to determine the line width and load the root node
+    line = next(fh)
+    line_width = len(line)
 
-        while True:
-            node_dict = json.loads(line.strip())
+    while True:
+        node_dict = json.loads(line.strip())
 
-            key_index = bisect.bisect_left(node_dict['keys'], key)
+        key_index = bisect.bisect_left(node_dict['keys'], key)
 
-            try:
-                tmp_key = node_dict['keys'][key_index]
-            except IndexError:
-                tmp_key = None
+        try:
+            tmp_key = node_dict['keys'][key_index]
+        except IndexError:
+            tmp_key = None
 
-            if tmp_key == key:
-                log.info("key %s is in the tree, took %d seeks" % (key, seek_count))
-                return node_dict['values'][key_index]
+        if tmp_key == key:
+            log.info("key %s is in the tree, took %d seeks" % (key, seek_count))
+            return node_dict['values'][key_index]
 
-                #for (key_index, tmp_key) in enumerate(node_dict['keys']):
-                #    if tmp_key == key:
-                #        log.info("key %s is in the tree, took %d seeks" % (key, seek_count))
-                #        return node_dict['values'][key_index]
+        # If this node is a leaf then our search is done, return None
+        elif not node_dict['nodes']:
+            log.info("key %s is NOT in the tree, took %d seeks" % (key, seek_count))
+            return None
 
-                #raise Exception("could not find key %s in node\n%s\n" % (key, pformat(node_dict)))
+        # If this node is NOT a leaf then keep searching
+        else:
+            # seek to the line number of the next node
+            node_index = bisect.bisect_right(node_dict['keys'], key)
+            child_node_line_number = node_dict['nodes'][node_index]
+            fh.seek(child_node_line_number * line_width)
+            line = fh.read(line_width)
+            seek_count += 1
 
-            # If this node is a leaf then our search is done, return None
-            elif not node_dict['nodes']:
-                log.info("key %s is NOT in the tree, took %d seeks" % (key, seek_count))
-                return None
-
-            # If this node is NOT a leaf then keep searching
-            else:
-                # dwalton seek to the line number of the next node
-                node_index = bisect.bisect_right(node_dict['keys'], key)
-                child_node_line_number = node_dict['nodes'][node_index]
-                fh.seek(child_node_line_number * line_width)
-                line = fh.read(line_width)
-                seek_count += 1
-
+    return None
 
 
 class BTreeNode(object):
@@ -198,7 +192,7 @@ class BTreeNode(object):
 
             self.nodes.insert(i+1, right_node)
 
-        log.info("%s: adding %s at index %d" % (self, key, i))
+        #log.info("%s: adding %s at index %d" % (self, key, i))
         self.keys.insert(i, key)
         self.values.insert(i, value)
         self.key_count += 1
@@ -439,12 +433,12 @@ class BTree(object):
             self.root = new_root
 
             self.set_depth(self.root, 0)
-            self.sanity(self.root)
+            #self.sanity(self.root)
 
         # Move up
         else:
             left_node.parent.add(move_up_key, move_up_value, left_node, right_node)
-            self.sanity(self.root)
+            #self.sanity(self.root)
 
             if self.is_overfull(left_node.parent):
                 self.split(left_node.parent)
@@ -545,7 +539,7 @@ class BTree(object):
 
         # Populate self.root and sanity check everything
         self.root = line_number_to_nodes[0]
-        self.sanity(self.root)
+        #self.sanity(self.root)
 
 
 if __name__ == '__main__':
