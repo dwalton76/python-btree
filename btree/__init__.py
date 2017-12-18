@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 
 import bisect
-import json
+import ujson as json
 import logging
 import math
 import os
 import random
+import re
 import shutil
 import sys
 from pprint import pformat
@@ -51,45 +52,104 @@ def file_pad_lines(filename):
     shutil.move(filename_pad, filename)
 
 
-def disk_get(fh, key):
+def disk_get_first_node(fh):
+    fh.seek(0)
+    line = next(fh)
+    return json.loads(line.strip())
+
+
+def disk_get_line_width(fh):
+    fh.seek(0)
+    line = next(fh)
+    return len(line)
+
+
+def disk_get(fh, key, first_node=None, line_width=None):
     """
     Traverse a text file containing a disk_save() BTree and return the value
     for key or None if the key is not found
     """
     seek_count = 0
 
+    # Read the first line to determine the line width and load the root node
+    if line_width is None:
+        fh.seek(0)
+        line = next(fh)
+        line_width = len(line)
+
+    '''
+    if first_node is not None:
+        node_dict = first_node
+    else:
+        fh.seek(0)
+        line = next(fh)
+        node_dict = json.loads(line)
+    '''
+
     fh.seek(0)
 
-    # Read the first line to determine the line width and load the root node
-    line = next(fh)
-    line_width = len(line)
-
     while True:
-        node_dict = json.loads(line.strip())
+        # A node is written over three lines:
+        # - keys
+        # - nodes (children)
+        # - values
 
-        key_index = bisect.bisect_left(node_dict['keys'], key)
+        # ====
+        # keys
+        # ====
+        keys_line = fh.read(line_width).decode('utf-8')
 
-        try:
-            tmp_key = node_dict['keys'][key_index]
-        except IndexError:
-            tmp_key = None
+        # Only bother doing the rstrip and the split when 'key' is in the keys_line
+        if key in keys_line:
+            keys = keys_line.rstrip().split(',')
+            key_index = bisect.bisect_left(keys, key)
 
-        if tmp_key == key:
-            log.info("key %s is in the tree, took %d seeks" % (key, seek_count))
-            return node_dict['values'][key_index]
+            try:
+                tmp_key = keys[key_index]
+            except IndexError:
+                tmp_key = None
 
-        # If this node is a leaf then our search is done, return None
-        elif not node_dict['nodes']:
-            log.info("key %s is NOT in the tree, took %d seeks" % (key, seek_count))
-            return None
-
-        # If this node is NOT a leaf then keep searching
         else:
+            tmp_key = None
+            keys = None
+
+        # We found the key!!! Return the value
+        if tmp_key == key:
+
+            # ======
+            # values
+            # ======
+            line = next(fh) # nodes
+            line = next(fh) # values
+            values = line.decode('utf-8').rstrip().split(',')
+            #log.info("values: %s\n\n" % pformat(values))
+            #log.info("found value at depth %d" % depth)
+
+            #log.info("key %s is in the tree, took %d seeks" % (key, seek_count))
+            return values[key_index]
+
+        # =====
+        # nodes
+        # =====
+        line = next(fh) # nodes
+        nodes_line = line.decode('utf-8')
+
+        # If nodes is empty then we are a leaf node and our search is done, return None
+        if nodes_line.startswith(' '):
+            #log.info("key %s is NOT in the tree, took %d seeks" % (key, seek_count))
+            return None
+        else:
+            nodes = nodes_line.rstrip().split(',')
+
+            if keys is None:
+                keys = keys_line.rstrip().split(',')
+
+            # This node is NOT a leaf, keep searching
             # seek to the line number of the next node
-            node_index = bisect.bisect_right(node_dict['keys'], key)
-            child_node_line_number = node_dict['nodes'][node_index]
+            node_index = bisect.bisect_right(keys, key)
+            child_node_line_number = int(nodes[node_index])
+
             fh.seek(child_node_line_number * line_width)
-            line = fh.read(line_width)
             seek_count += 1
 
     return None
@@ -322,6 +382,7 @@ class BTree(object):
         return node.key_count > self.ORDER
 
     def add(self, key, value):
+        key = str(key)
 
         # Add the key to the appropriate Node
         node = self.find_key_insert_node(key)
@@ -447,7 +508,7 @@ class BTree(object):
         node.line_number = self.line_number
 
         for child_node in node.nodes:
-            self.line_number += 1
+            self.line_number += 3
             self._assign_line_number(child_node)
 
     def assign_line_number(self):
@@ -465,16 +526,21 @@ class BTree(object):
         """
 
         # Create a dict that has the parts of 'node' that we want to save to disk
+        '''
         node_dict = {
                 'depth' : node.depth,
                 'keys' : node.keys,
                 'values' : node.values,
                 'nodes' : [x.line_number for x in node.nodes],
         }
+        '''
+        nodes_line_numbers = [x.line_number for x in node.nodes]
 
         # json dump that dict to fh
-        json.dump(node_dict, fh)
-        fh.write('\n')
+        #json.dump(node_dict, fh)
+        fh.write(','.join(node.keys) + '\n')
+        fh.write(','.join(map(str, nodes_line_numbers)) + '\n')
+        fh.write(','.join(node.values) + '\n')
 
         # Repeat for all of node's children
         for child_node in node.nodes:
@@ -559,7 +625,6 @@ if __name__ == '__main__':
     try:
         # Test the basics...use this site to verify results
         # https://www.cs.usfca.edu/~galles/visualization/BTree.html
-        '''
         btree.add(2, 'a')
         btree.add(4, 'b')
         btree.add(5, 'c')
@@ -577,10 +642,9 @@ if __name__ == '__main__':
         btree.add(28, 'l')
         print(btree.ascii())
 
-        print("key %s has value %s" % (8, btree.get(8)))
+        print("key %s has value %s" % ('8', btree.get('8')))
         #print("key %s has value %s" % (47, btree.get(47)))
         btree.disk_save("foo.btree")
-        '''
 
         # Load a BTree from disk
         '''
@@ -592,8 +656,9 @@ if __name__ == '__main__':
         '''
 
         # Search for a key in a BTree that has been saved to disk
-        print("key %s has value %s" % (8, disk_get('foo.btree', 8)))
-        print("key %s has value %s" % (47, disk_get('foo.btree', 47)))
+        with open('foo.btree', 'rb') as fh:
+            print("key %s has value %s" % (8, disk_get(fh, '8')))
+            print("key %s has value %s" % (47, disk_get(fh, '47')))
 
 
 
