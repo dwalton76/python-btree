@@ -57,12 +57,12 @@ def btree_disk_get_first_node(fh):
     keys = line.decode('utf-8').rstrip().split(',')
 
     line = next(fh)
-    nodes = line.decode('utf-8').rstrip().split(',')
+    children = line.decode('utf-8').rstrip().split(',')
 
     line = next(fh)
     values = line.decode('utf-8').rstrip().split(',')
 
-    return (keys, nodes, values)
+    return (keys, children, values)
 
 
 def btree_disk_get_line_width(fh):
@@ -71,7 +71,7 @@ def btree_disk_get_line_width(fh):
     return len(line)
 
 
-def btree_disk_get(fh, key, first_node_keys=None, first_node_values=None, first_node_nodes=None, line_width=None):
+def btree_disk_get(fh, key, first_node_keys=None, first_node_values=None, first_node_children=None, line_width=None):
     """
     Traverse a text file containing a disk_save() BTree and return the value
     for key or None if the key is not found
@@ -99,7 +99,7 @@ def btree_disk_get(fh, key, first_node_keys=None, first_node_values=None, first_
         # This node is NOT a leaf, keep searching
         # seek to the line number of the next node
         node_index = bisect.bisect_right(first_node_keys, key)
-        child_node_line_number = int(first_node_nodes[node_index])
+        child_node_line_number = int(first_node_children[node_index])
 
         fh.seek(child_node_line_number * line_width)
         seek_count += 1
@@ -112,7 +112,7 @@ def btree_disk_get(fh, key, first_node_keys=None, first_node_values=None, first_
     while True:
         # A node is written over three lines:
         # - keys
-        # - nodes (children)
+        # - children
         # - values
 
         # ====
@@ -152,24 +152,24 @@ def btree_disk_get(fh, key, first_node_keys=None, first_node_values=None, first_
             # ======
             # values
             # ======
-            line = next(fh) # nodes
+            line = next(fh) # children
             line = next(fh) # values
             values = line.decode('utf-8').rstrip().split(',')
             #log.info("key %s is in the tree, took %d seeks" % (key, seek_count))
             return values[key_index]
 
         # =====
-        # nodes
+        # children
         # =====
-        line = next(fh) # nodes
-        nodes_line = line.decode('utf-8')
+        line = next(fh) # children
+        children_line = line.decode('utf-8')
 
-        # If nodes is empty then we are a leaf node and our search is done, return None
-        if nodes_line.startswith(' '):
+        # If children is empty then we are a leaf node and our search is done, return None
+        if children_line.startswith(' '):
             #log.info("key %s is NOT in the tree, took %d seeks" % (key, seek_count))
             return None
         else:
-            nodes = nodes_line.rstrip().split(',')
+            children = children_line.rstrip().split(',')
 
             if keys is None:
                 keys = keys_line.rstrip().split(',')
@@ -177,7 +177,7 @@ def btree_disk_get(fh, key, first_node_keys=None, first_node_values=None, first_
             # This node is NOT a leaf, keep searching
             # seek to the line number of the next node
             node_index = bisect.bisect_right(keys, key)
-            child_node_line_number = int(nodes[node_index])
+            child_node_line_number = int(children[node_index])
 
             fh.seek(child_node_line_number * line_width)
             seek_count += 1
@@ -193,7 +193,7 @@ class BTreeNode(object):
         self.parent = parent
         self.keys = []
         self.values = []
-        self.nodes = []
+        self.children = []
         self.key_count = 0
 
         # Only used when saving BTree to disk
@@ -214,7 +214,7 @@ class BTreeNode(object):
         """
         Return True if we are a leaf
         """
-        return not self.nodes
+        return not self.children
 
     def is_root(self):
         """
@@ -282,15 +282,15 @@ class BTreeNode(object):
             assert right_node is not None, "left_node is %s but right_node is None" % left_node
             #log.info("keys       : %s" % pformat(self.keys))
             #log.info("values     : %s" % pformat(self.values))
-            #log.info("nodes      : %s" % ' '.join([str(x) for x in self.nodes]))
+            #log.info("children      : %s" % ' '.join([str(x) for x in self.children]))
             #log.info("insert     : %s" % i)
             #log.info("left_node  : %s" % left_node)
             #log.info("right_node : %s" % right_node)
 
-            if self.nodes[i] != left_node:
-                raise InvalidTree("%s nodes[%s] is %s but it should be left_node %s" % (self, i, self.nodes[i], left_node))
+            if self.children[i] != left_node:
+                raise InvalidTree("%s children[%s] is %s but it should be left_node %s" % (self, i, self.children[i], left_node))
 
-            self.nodes.insert(i+1, right_node)
+            self.children.insert(i+1, right_node)
 
         #log.info("%s: adding %s at index %d" % (self, key, i))
         self.keys.insert(i, key)
@@ -302,9 +302,9 @@ class BTreeNode(object):
 
     def sanity_child_parent_relationship(self):
         """
-        Verify all of our children list us as their parent
+        Verify all of our children lists us as their parent
         """
-        for child_node in self.nodes:
+        for child_node in self.children:
             if child_node.parent != self:
                 raise InvalidTree("%s child_node %s does not list us as their parent, their parent is %s" %
                     (self, child_node, child_node.parent))
@@ -313,7 +313,7 @@ class BTreeNode(object):
         """
         Verify our parent lists us as their child
         """
-        for child_node in self.parent.nodes:
+        for child_node in self.parent.children:
             if child_node == self:
                 break
         else:
@@ -323,8 +323,8 @@ class BTreeNode(object):
 
         # A root node
         if self.is_root():
-            if len(self.nodes) != self.key_count + 1:
-                raise InvalidTree("%s has %d nodes and %d keys" % (self, len(self.nodes), self.key_count))
+            if len(self.children) != self.key_count + 1:
+                raise InvalidTree("%s has %d children and %d keys" % (self, len(self.children), self.key_count))
 
             self.sanity_child_parent_relationship()
 
@@ -337,8 +337,8 @@ class BTreeNode(object):
 
         # A middle node
         else:
-            if len(self.nodes) != self.key_count + 1:
-                raise InvalidTree("%s has %d nodes and %d keys" % (self, len(self.nodes), self.key_count))
+            if len(self.children) != self.key_count + 1:
+                raise InvalidTree("%s has %d children and %d keys" % (self, len(self.children), self.key_count))
 
             self.sanity_child_parent_relationship()
             self.sanity_parent_child_relationship()
@@ -361,9 +361,9 @@ class BTree(object):
         if node.has_key(key):
             return node
         else:
-            if node.nodes:
+            if node.children:
                 node_index = bisect.bisect_right(node.keys, key)
-                child_node = node.nodes[node_index]
+                child_node = node.children[node_index]
                 return self._find_key_node(child_node, key)
 
         return None
@@ -388,7 +388,7 @@ class BTree(object):
 
         else:
             node_index = bisect.bisect_right(node.keys, key)
-            child_node = node.nodes[node_index]
+            child_node = node.children[node_index]
             return self._find_key_insert_node(child_node, key)
 
         return None
@@ -446,7 +446,7 @@ class BTree(object):
         output = []
         output.append(node.ascii())
 
-        for child_node in node.nodes:
+        for child_node in node.children:
             output.extend(self._ascii(child_node))
 
         return output
@@ -456,20 +456,20 @@ class BTree(object):
 
     def set_depth(self, node, depth):
         """
-        Starting with 'node', set the depth for all nodes (recursive)
+        Starting with 'node', set the depth for all children (recursive)
         """
         node.depth = depth
 
-        for child_node in node.nodes:
+        for child_node in node.children:
             self.set_depth(child_node, depth + 1)
 
     def sanity(self, node):
         """
-        Sanity check all nodes (recursive)
+        Sanity check all children (recursive)
         """
         node.sanity()
 
-        for child_node in node.nodes:
+        for child_node in node.children:
             self.sanity(child_node)
 
     def split(self, left_node):
@@ -508,26 +508,26 @@ class BTree(object):
         left_node.key_count = len(left_node.keys)
 
         # Move node pointers
-        right_node.nodes = left_node.nodes[move_right_index:]
-        left_node.nodes = left_node.nodes[:move_right_index]
+        right_node.children = left_node.children[move_right_index:]
+        left_node.children = left_node.children[:move_right_index]
 
-        for child_node in right_node.nodes:
+        for child_node in right_node.children:
             child_node.parent = right_node
 
         # Move up to a new root
         if new_root:
             new_root.add(move_up_key, move_up_value)
-            new_root.nodes.append(left_node)
-            new_root.nodes.append(right_node)
+            new_root.children.append(left_node)
+            new_root.children.append(right_node)
 
             left_node.parent = new_root
 
-            for child_node in left_node.nodes:
+            for child_node in left_node.children:
                 child_node.parent = left_node
 
             right_node.parent = new_root
 
-            for child_node in right_node.nodes:
+            for child_node in right_node.children:
                 child_node.parent = right_node
 
             self.root = new_root
@@ -550,7 +550,7 @@ class BTree(object):
     def _assign_line_number(self, node):
         node.line_number = self.line_number
 
-        for child_node in node.nodes:
+        for child_node in node.children:
             self.line_number += 3
             self._assign_line_number(child_node)
 
@@ -571,7 +571,7 @@ class BTree(object):
             self.max_depth = node.depth
 
         # Repeat for all of node's children
-        for child_node in node.nodes:
+        for child_node in node.children:
             self._stats(child_node)
 
     def stats(self):
@@ -586,17 +586,17 @@ class BTree(object):
         """
         Write 'node' to fh (recursive). Each node will be written via three lines:
         - keys
-        - child nodes (will be a list of the line numbers where the child nodes live in the file)
+        - child children (will be a list of the line numbers where the child children live in the file)
         - values
         """
-        nodes_line_numbers = [x.line_number for x in node.nodes]
+        children_line_numbers = [x.line_number for x in node.children]
 
         fh.write(','.join(node.keys) + '\n')
-        fh.write(','.join(map(str, nodes_line_numbers)) + '\n')
+        fh.write(','.join(map(str, children_line_numbers)) + '\n')
         fh.write(','.join(node.values) + '\n')
 
         # Repeat for all of node's children
-        for child_node in node.nodes:
+        for child_node in node.children:
             self._disk_save(child_node, fh)
 
     def disk_save(self, filename):
@@ -622,7 +622,7 @@ class BTree(object):
         it would be better to use btree_disk_get().
         """
         self.root = None
-        line_number_to_nodes = {}
+        line_number_to_children = {}
         line_number = 0
 
         # Create a BTreeNode object for each line in the file...there is one node per line
@@ -631,45 +631,45 @@ class BTree(object):
             while True:
                 try:
                     keys_line = next(fh)
-                    nodes_line = next(fh)
+                    children_line = next(fh)
                     values_line = next(fh)
                 except StopIteration:
                     break
 
                 keys_line = keys_line.decode('utf-8').rstrip()
-                nodes_line = nodes_line.decode('utf-8').rstrip()
+                children_line = children_line.decode('utf-8').rstrip()
                 values_line = values_line.decode('utf-8').rstrip()
 
                 node = BTreeNode(None)
                 node.keys = keys_line.split(',')
 
-                if nodes_line:
-                    node.nodes = [int(x) for x in nodes_line.split(',')]
+                if children_line:
+                    node.children = [int(x) for x in children_line.split(',')]
                 else:
-                    node.nodes = []
+                    node.children = []
 
                 node.values = values_line.split(',')
                 node.key_count = len(node.keys)
                 node.line_number = line_number
 
-                line_number_to_nodes[line_number] = node
+                line_number_to_children[line_number] = node
                 line_number += 3
 
         # Now convert all of the line_number references to the BTreeNode object that
         # was created for the node on that line_number
         for x in range(0, line_number, 3):
-            node = line_number_to_nodes[x]
+            node = line_number_to_children[x]
 
-            for (index, line_number_child_node) in enumerate(node.nodes):
-                child_node = line_number_to_nodes[line_number_child_node]
+            for (index, line_number_child_node) in enumerate(node.children):
+                child_node = line_number_to_children[line_number_child_node]
                 child_node.parent = node
 
-                node.nodes[index] = child_node
+                node.children[index] = child_node
 
         # Populate self.root
-        self.root = line_number_to_nodes[0]
+        self.root = line_number_to_children[0]
 
-        # Populate the depth for all nodes
+        # Populate the depth for all children
         self.set_depth(self.root, 0)
 
         # sanity check everything
