@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import bisect
-import ujson as json
 import logging
 import math
 import os
@@ -9,6 +8,7 @@ import random
 import re
 import shutil
 import sys
+import unittest
 from pprint import pformat
 
 log = logging.getLogger(__name__)
@@ -36,8 +36,6 @@ def file_pad_lines(filename):
             if length > max_length:
                 max_length = length
 
-    log.info("%s max_length: %d" % (filename, max_length))
-
     with open(filename_pad, 'w') as fh_pad:
         with open(filename, 'r') as fh:
             for line in fh:
@@ -52,19 +50,28 @@ def file_pad_lines(filename):
     shutil.move(filename_pad, filename)
 
 
-def disk_get_first_node(fh):
+def btree_disk_get_first_node(fh):
     fh.seek(0)
+
     line = next(fh)
-    return json.loads(line.strip())
+    keys = line.decode('utf-8').rstrip().split(',')
+
+    line = next(fh)
+    nodes = line.decode('utf-8').rstrip().split(',')
+
+    line = next(fh)
+    values = line.decode('utf-8').rstrip().split(',')
+
+    return (keys, nodes, values)
 
 
-def disk_get_line_width(fh):
+def btree_disk_get_line_width(fh):
     fh.seek(0)
     line = next(fh)
     return len(line)
 
 
-def disk_get(fh, key, first_node=None, line_width=None):
+def btree_disk_get(fh, key, first_node_keys=None, first_node_values=None, first_node_nodes=None, line_width=None):
     """
     Traverse a text file containing a disk_save() BTree and return the value
     for key or None if the key is not found
@@ -77,16 +84,30 @@ def disk_get(fh, key, first_node=None, line_width=None):
         line = next(fh)
         line_width = len(line)
 
-    '''
-    if first_node is not None:
-        node_dict = first_node
+    if first_node_keys is not None:
+        key_index = bisect.bisect_left(first_node_keys, key)
+
+        try:
+            tmp_key = first_node_keys[key_index]
+        except IndexError:
+            tmp_key = None
+
+        # We found the key!!! Return the value
+        if tmp_key == key:
+            return first_node_values[key_index]
+
+        # This node is NOT a leaf, keep searching
+        # seek to the line number of the next node
+        node_index = bisect.bisect_right(first_node_keys, key)
+        child_node_line_number = int(first_node_nodes[node_index])
+
+        fh.seek(child_node_line_number * line_width)
+        seek_count += 1
+
     else:
         fh.seek(0)
-        line = next(fh)
-        node_dict = json.loads(line)
-    '''
 
-    fh.seek(0)
+    depth = 0
 
     while True:
         # A node is written over three lines:
@@ -97,9 +118,21 @@ def disk_get(fh, key, first_node=None, line_width=None):
         # ====
         # keys
         # ====
+        # TODO will 'if key in keys_line' work if this is not decoded?
         keys_line = fh.read(line_width).decode('utf-8')
 
-        # Only bother doing the rstrip and the split when 'key' is in the keys_line
+        # uncomment to print a summary of each node through the search
+        #keys = keys_line.rstrip().split(',')
+        #output = '| %d keys, depth %d |' % (len(keys), depth)
+        #tmp_width = len(output) - 2
+        #padding = '      ' * depth
+
+        #print("%s+%s+\n%s%s\n%s+%s+" % (
+        #    padding, '-' * tmp_width,
+        #    padding, output,
+        #    padding, '-' * tmp_width))
+
+        # Only bother doing the rstrip, split, etc when 'key' is in the keys_line
         if key in keys_line:
             keys = keys_line.rstrip().split(',')
             key_index = bisect.bisect_left(keys, key)
@@ -122,9 +155,6 @@ def disk_get(fh, key, first_node=None, line_width=None):
             line = next(fh) # nodes
             line = next(fh) # values
             values = line.decode('utf-8').rstrip().split(',')
-            #log.info("values: %s\n\n" % pformat(values))
-            #log.info("found value at depth %d" % depth)
-
             #log.info("key %s is in the tree, took %d seeks" % (key, seek_count))
             return values[key_index]
 
@@ -151,6 +181,8 @@ def disk_get(fh, key, first_node=None, line_width=None):
 
             fh.seek(child_node_line_number * line_width)
             seek_count += 1
+
+        depth += 1
 
     return None
 
@@ -193,10 +225,12 @@ class BTreeNode(object):
     def has_key(self, key):
         """
         Return True if we have 'key'
-
-        TODO this should use bisect to find the entry
         """
-        return key in self.keys
+        index = bisect.bisect_left(self.keys, key)
+        try:
+            return self.keys[index] == key
+        except IndexError:
+            return False
 
     def key_insert_position(self, key):
         """
@@ -205,11 +239,17 @@ class BTreeNode(object):
         return bisect.bisect_right(self.keys, key)
 
     def get(self, key):
+        """
+        Return the value for 'key' or None if we do not have this key
+        """
+        index = bisect.bisect_left(self.keys, key)
 
-        if self.has_key(key):
-            index = bisect.bisect_left(self.keys, key)
-            return self.values[index]
-        else:
+        try:
+            if self.keys[index] == key:
+                return self.values[index]
+            else:
+                return None
+        except IndexError:
             return None
 
     def ascii(self):
@@ -309,6 +349,7 @@ class BTree(object):
     def __init__(self, ORDER):
         self.ORDER = ORDER
         self.root = BTreeNode(None)
+        self.sanity_check_enabled = False
 
     def __str__(self):
         return 'BTree'
@@ -317,8 +358,6 @@ class BTree(object):
         """
         Walk the tree and find the node with 'key'
         """
-        # dwalton comparison here
-        # TODO clean this up
         if node.has_key(key):
             return node
         else:
@@ -339,7 +378,6 @@ class BTree(object):
         a must for B Trees but for my use case I should never see a
         duplicate key so for now I am going to sanity check for this.
         """
-
         if node.is_leaf():
 
             # For now we are not supporting duplicate keys
@@ -358,22 +396,23 @@ class BTree(object):
     def find_key_insert_node(self, key):
         return self._find_key_insert_node(self.root, key)
 
-    def has_key(self, key):
-        """
-        Return True if 'key' lives in this tree
-        """
-        return self.find_key(key) is not None
-
     def get(self, key):
         """
         Return the value for key
         """
+        key = str(key)
         node = self.find_key_node(key)
 
         if node:
             return node.get(key)
         else:
             return None
+
+    def has_key(self, key):
+        """
+        Return True if 'key' lives in this tree
+        """
+        return self.get(key) is not None
 
     def is_overfull(self, node):
         """
@@ -494,12 +533,16 @@ class BTree(object):
             self.root = new_root
 
             self.set_depth(self.root, 0)
-            #self.sanity(self.root)
+
+            if self.sanity_check_enabled:
+                self.sanity(self.root)
 
         # Move up
         else:
             left_node.parent.add(move_up_key, move_up_value, left_node, right_node)
-            #self.sanity(self.root)
+
+            if self.sanity_check_enabled:
+                self.sanity(self.root)
 
             if self.is_overfull(left_node.parent):
                 self.split(left_node.parent)
@@ -520,24 +563,34 @@ class BTree(object):
         self.line_number = 0
         self._assign_line_number(self.root)
 
+    def _stats(self, node):
+        self.node_count += 1
+        self.key_count += len(node.keys)
+
+        if node.depth > self.max_depth:
+            self.max_depth = node.depth
+
+        # Repeat for all of node's children
+        for child_node in node.nodes:
+            self._stats(child_node)
+
+    def stats(self):
+        self.node_count = 0
+        self.key_count = 0
+        self.max_depth = 0
+        self._stats(self.root)
+
+        return (self.node_count, self.key_count, self.max_depth)
+
     def _disk_save(self, node, fh):
         """
-        Write 'node' to fh (recursive)
+        Write 'node' to fh (recursive). Each node will be written via three lines:
+        - keys
+        - child nodes (will be a list of the line numbers where the child nodes live in the file)
+        - values
         """
-
-        # Create a dict that has the parts of 'node' that we want to save to disk
-        '''
-        node_dict = {
-                'depth' : node.depth,
-                'keys' : node.keys,
-                'values' : node.values,
-                'nodes' : [x.line_number for x in node.nodes],
-        }
-        '''
         nodes_line_numbers = [x.line_number for x in node.nodes]
 
-        # json dump that dict to fh
-        #json.dump(node_dict, fh)
         fh.write(','.join(node.keys) + '\n')
         fh.write(','.join(map(str, nodes_line_numbers)) + '\n')
         fh.write(','.join(node.values) + '\n')
@@ -548,15 +601,9 @@ class BTree(object):
 
     def disk_save(self, filename):
         """
-        Save the BTree to a text file.  This is done by converting each node
-        to a dict and adding that dict to the file as json. We write one node
-        per line and in the end pad all of the lines to be the same length.
-        The padding is done so that disk_get() can easily seek() to a specific
-        line/node.
-
-        Saving the tree to disk allows us to come back later and traverse the
-        text file copy of the tree via filehandle seeks/reads without loading
-        the tree into memory.
+        Save the BTree to a text file.  Saving the tree to disk allows us to
+        come back later and traverse the text file copy of the tree via
+        filehandle seeks/reads without loading the tree into memory.
         """
 
         # Assign each node a line number
@@ -572,29 +619,45 @@ class BTree(object):
         """
         Load a BTree from a text file. If you only need to get the value of a
         single key or the tree is so large that you cannot hold it in memory
-        it would be better to use disk_get().
+        it would be better to use btree_disk_get().
         """
         self.root = None
         line_number_to_nodes = {}
         line_number = 0
 
         # Create a BTreeNode object for each line in the file...there is one node per line
-        with open(filename, 'r') as fh:
-            for line in fh:
-                node_dict = json.loads(line.strip())
+        with open(filename, 'rb') as fh:
+
+            while True:
+                try:
+                    keys_line = next(fh)
+                    nodes_line = next(fh)
+                    values_line = next(fh)
+                except StopIteration:
+                    break
+
+                keys_line = keys_line.decode('utf-8').rstrip()
+                nodes_line = nodes_line.decode('utf-8').rstrip()
+                values_line = values_line.decode('utf-8').rstrip()
+
                 node = BTreeNode(None)
-                node.depth = node_dict['depth']
-                node.keys = node_dict['keys'][:]
-                node.values = node_dict['values'][:]
-                node.nodes = node_dict['nodes'][:]
+                node.keys = keys_line.split(',')
+
+                if nodes_line:
+                    node.nodes = [int(x) for x in nodes_line.split(',')]
+                else:
+                    node.nodes = []
+
+                node.values = values_line.split(',')
                 node.key_count = len(node.keys)
                 node.line_number = line_number
+
                 line_number_to_nodes[line_number] = node
-                line_number += 1
+                line_number += 3
 
         # Now convert all of the line_number references to the BTreeNode object that
         # was created for the node on that line_number
-        for x in range(line_number):
+        for x in range(0, line_number, 3):
             node = line_number_to_nodes[x]
 
             for (index, line_number_child_node) in enumerate(node.nodes):
@@ -603,28 +666,48 @@ class BTree(object):
 
                 node.nodes[index] = child_node
 
-        # Populate self.root and sanity check everything
+        # Populate self.root
         self.root = line_number_to_nodes[0]
-        #self.sanity(self.root)
+
+        # Populate the depth for all nodes
+        self.set_depth(self.root, 0)
+
+        # sanity check everything
+        if self.sanity_check_enabled:
+            self.sanity(self.root)
 
 
-if __name__ == '__main__':
+class TestBTreeNode(unittest.TestCase):
 
-    # setup logging
-    logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s %(filename)16s %(levelname)8s: %(message)s')
-    log = logging.getLogger(__name__)
+    def setUp(self):
+        self.node = BTreeNode(None)
+        self.node.add('d', '4')
+        self.node.add('b', '2')
+        self.node.add('a', '1')
 
-    # Color the errors and warnings in red
-    logging.addLevelName(logging.ERROR, "\033[91m   %s\033[0m" % logging.getLevelName(logging.ERROR))
-    logging.addLevelName(logging.WARNING, "\033[91m %s\033[0m" % logging.getLevelName(logging.WARNING))
+    def test_is_root(self):
+        self.assertTrue(self.node.is_root())
 
-    btree = BTree(2)
-    # 2, 4, 5, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24
+    def test_is_leaf(self):
+        self.assertTrue(self.node.is_leaf())
 
-    try:
-        # Test the basics...use this site to verify results
-        # https://www.cs.usfca.edu/~galles/visualization/BTree.html
+    def test_has_key(self):
+        self.assertTrue(self.node.has_key('d'))
+        self.assertFalse(self.node.has_key('z'))
+
+    def test_key_insert_position(self):
+        self.assertEquals(self.node.key_insert_position('c'), 2)
+        self.assertEquals(self.node.key_insert_position('f'), 3)
+
+    def test_get(self):
+        self.assertEquals(self.node.get('d'), '4')
+        self.assertEquals(self.node.get('z'), None)
+
+
+class TestBTree(unittest.TestCase):
+
+    def setUp(self):
+        btree = BTree(2)
         btree.add(2, 'a')
         btree.add(4, 'b')
         btree.add(5, 'c')
@@ -640,51 +723,103 @@ if __name__ == '__main__':
         btree.add(24, 'l')
         btree.add(26, 'l')
         btree.add(28, 'l')
-        print(btree.ascii())
+        self.btree = btree
 
-        print("key %s has value %s" % ('8', btree.get('8')))
-        #print("key %s has value %s" % (47, btree.get(47)))
-        btree.disk_save("foo.btree")
+    def test_find_key_node(self):
+        node = self.btree.find_key_node('26')
+        self.assertEqual(node.keys, ['26',])
 
-        # Load a BTree from disk
-        '''
-        btree = None
-        btree = BTree(2)
-        btree.disk_load("foo.btree")
-        print(btree.ascii())
-        print("key %s has value %s" % (8, btree.get(8)))
-        '''
+    def test_find_key_insert_node(self):
+        node = self.btree.find_key_insert_node('44')
+        self.assertEquals(node.keys, ['5',])
+
+    def test_get(self):
+        self.assertEquals(self.btree.get('2'), 'a')
+        self.assertEquals(self.btree.get('8'), 'e')
+
+    def test_has_key(self):
+        self.assertTrue(self.btree.has_key('26'))
+        self.assertFalse(self.btree.has_key('1234'))
+
+    def test_is_overfull(self):
+        node = self.btree.find_key_node('26')
+        self.assertFalse(self.btree.is_overfull(node))
+
+    def test_ascii(self):
+        """
+        Just test that this doesn't crash
+        """
+        self.btree.ascii()
+
+    def test_stats(self):
+        (node_count, key_count, max_depth) = self.btree.stats()
+        self.assertEquals(node_count, 15)
+        self.assertEquals(key_count, 15)
+        self.assertEquals(max_depth, 3)
+
+    def test_disk_save(self):
+        self.btree.disk_save("foo.btree")
+
+    def test_disk_load(self):
+        self.btree.disk_save("foo.btree")
+
+        tmp_tree = BTree(2)
+        tmp_tree.disk_load("foo.btree")
+        self.assertEqual(tmp_tree.get('2'), 'a')
+        self.assertEqual(tmp_tree.get('8'), 'e')
+
+    def test_disk_get(self):
+        self.btree.disk_save("foo.btree")
 
         # Search for a key in a BTree that has been saved to disk
         with open('foo.btree', 'rb') as fh:
-            print("key %s has value %s" % (8, disk_get(fh, '8')))
-            print("key %s has value %s" % (47, disk_get(fh, '47')))
+            self.assertEqual(btree_disk_get(fh, '2'), 'a')
+            self.assertEqual(btree_disk_get(fh, '8'), 'e')
 
-
-
-        '''
+    def test_random(self):
+        """
+        Build a random tree (with sanity checking enabled) to test for crashes
+        """
+        tmp_tree = BTree(2)
+        tmp_tree.sanity_check_enabled = True
         first = None
-        numbers = []
+        last = None
+        added = {}
 
-        for x in range(20):
-            number = int(random.randint(1,101))
+        for x in range(40):
+            key = int(random.randint(1,101))
 
-            if number in numbers:
+            if key in added:
                 continue
 
-            numbers.append(number)
-            btree.add(number, 'a')
+            value = int(random.randint(200,300))
+            added[key] = value
+            tmp_tree.add(key, value)
 
             if first is None:
-                first = number
+                first = key
+            last = key
 
-        print(btree.ascii())
-
-        print("key %s has value %s" % (first, btree.get(first)))
-        print("added %s" % ' '.join(map(str, numbers)))
-        '''
+        self.assertEqual(tmp_tree.get(first), added[first])
+        self.assertEqual(tmp_tree.get(last), added[last])
 
 
-    except (DuplicateKey, InvalidTree):
-        print(btree.ascii())
-        raise
+if __name__ == '__main__':
+
+    # setup logging
+    logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s %(filename)16s %(levelname)8s: %(message)s')
+    log = logging.getLogger(__name__)
+
+    # Color the errors and warnings in red
+    logging.addLevelName(logging.ERROR, "\033[91m   %s\033[0m" % logging.getLevelName(logging.ERROR))
+    logging.addLevelName(logging.WARNING, "\033[91m %s\033[0m" % logging.getLevelName(logging.WARNING))
+
+    # run all unittests
+    test_suites_to_run = []
+    test_suites_to_run.append(TestBTreeNode)
+    test_suites_to_run.append(TestBTree)
+
+    for test_suite in test_suites_to_run:
+        suite = unittest.TestLoader().loadTestsFromTestCase(test_suite)
+        unittest.TextTestRunner(verbosity=2).run(suite)

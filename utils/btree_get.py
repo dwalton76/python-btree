@@ -31,7 +31,7 @@ if not os.path.isfile(btree_filename):
     print("ERROR: %s does not exist" % btree_filename)
     sys.exit(1)
 
-with open(btree_filename, 'r') as fh:
+with open(btree_filename, 'rb') as fh:
     value = disk_get(fh, key)
 
 print(value)

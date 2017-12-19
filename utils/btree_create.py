@@ -49,13 +49,18 @@ with open(filename, 'r') as fh:
     for line in fh:
         (key, value) = line.strip().split(':')
         btree.add(key, value)
-
         line_number += 1
 
         if line_number % 100000 == 0:
             log.info("Added %d" % line_number)
+
     log.info("reading file: end")
 
     log.info("saving to disk: start")
     btree.disk_save(btree_filename)
     log.info("saving to disk: end")
+
+    (node_count, key_count, max_depth) = btree.stats()
+
+    log.info("tree has %d nodes, %d keys, levels %s" % (node_count, key_count, ' -> '.join(map(str, range(max_depth+1)))))
+
