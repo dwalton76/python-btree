@@ -50,63 +50,24 @@ def file_pad_lines(filename):
     shutil.move(filename_pad, filename)
 
 
-def btree_disk_get_first_node(fh):
-    fh.seek(0)
-
-    line = next(fh)
-    keys = line.decode('utf-8').rstrip().split(',')
-
-    line = next(fh)
-    children = line.decode('utf-8').rstrip().split(',')
-
-    line = next(fh)
-    values = line.decode('utf-8').rstrip().split(',')
-
-    return (keys, children, values)
-
-
 def btree_disk_get_line_width(fh):
+    """
+    Read the first line to determine the line width and load the root node
+    """
     fh.seek(0)
     line = next(fh)
     return len(line)
 
 
-def btree_disk_get(fh, key, first_node_keys=None, first_node_values=None, first_node_children=None, line_width=None):
+def btree_disk_get(fh, key, cache={}):
     """
     Traverse a text file containing a disk_save() BTree and return the value
     for key or None if the key is not found
     """
+    line_width = btree_disk_get_line_width(fh)
+    line_number = 0
+    avoided_seek_count = 0
     seek_count = 0
-
-    # Read the first line to determine the line width and load the root node
-    if line_width is None:
-        fh.seek(0)
-        line = next(fh)
-        line_width = len(line)
-
-    if first_node_keys is not None:
-        key_index = bisect.bisect_left(first_node_keys, key)
-
-        try:
-            tmp_key = first_node_keys[key_index]
-        except IndexError:
-            tmp_key = None
-
-        # We found the key!!! Return the value
-        if tmp_key == key:
-            return first_node_values[key_index]
-
-        # This node is NOT a leaf, keep searching
-        # seek to the line number of the next node
-        node_index = bisect.bisect_right(first_node_keys, key)
-        child_node_line_number = int(first_node_children[node_index])
-
-        fh.seek(child_node_line_number * line_width)
-        seek_count += 1
-
-    else:
-        fh.seek(0)
-
     depth = 0
 
     while True:
@@ -115,11 +76,31 @@ def btree_disk_get(fh, key, first_node_keys=None, first_node_values=None, first_
         # - children
         # - values
 
-        # ====
-        # keys
-        # ====
-        # TODO will 'if key in keys_line' work if this is not decoded?
-        keys_line = fh.read(line_width).decode('utf-8')
+        if line_number in cache:
+            avoided_seek_count += 1
+            keys = cache[line_number]['keys']
+            children = cache[line_number]['children']
+            values = cache[line_number]['values']
+        else:
+            fh.seek(line_number)
+            seek_count += 1
+
+            keys = fh.read(line_width).decode('utf-8').rstrip().split(',')
+
+            line = next(fh) # children
+            children = line.decode('utf-8').rstrip().split(',')
+
+            line = next(fh) # values
+            values = line.decode('utf-8').rstrip().split(',')
+
+            if not children or children == ['']:
+                children = None
+
+            cache[line_number] = {
+                'keys': keys,
+                'children': children,
+                'values': values
+            }
 
         # uncomment to print a summary of each node through the search
         #keys = keys_line.rstrip().split(',')
@@ -131,20 +112,12 @@ def btree_disk_get(fh, key, first_node_keys=None, first_node_values=None, first_
         #    padding, '-' * tmp_width,
         #    padding, output,
         #    padding, '-' * tmp_width))
+        key_index = bisect.bisect_left(keys, key)
 
-        # Only bother doing the rstrip, split, etc when 'key' is in the keys_line
-        if key in keys_line:
-            keys = keys_line.rstrip().split(',')
-            key_index = bisect.bisect_left(keys, key)
-
-            try:
-                tmp_key = keys[key_index]
-            except IndexError:
-                tmp_key = None
-
-        else:
+        try:
+            tmp_key = keys[key_index]
+        except IndexError:
             tmp_key = None
-            keys = None
 
         # We found the key!!! Return the value
         if tmp_key == key:
@@ -152,39 +125,29 @@ def btree_disk_get(fh, key, first_node_keys=None, first_node_values=None, first_
             # ======
             # values
             # ======
-            line = next(fh) # children
-            line = next(fh) # values
-            values = line.decode('utf-8').rstrip().split(',')
-            #log.info("key %s is in the tree, took %d seeks" % (key, seek_count))
-            return values[key_index]
+            #log.info("key %s is in the tree, took %d seeks, avoided %d seeks" % (key, seek_count, avoided_seek_count))
+            return (cache, values[key_index])
 
-        # =====
+        # ========
         # children
-        # =====
-        line = next(fh) # children
-        children_line = line.decode('utf-8')
-
-        # If children is empty then we are a leaf node and our search is done, return None
-        if children_line.startswith(' '):
-            #log.info("key %s is NOT in the tree, took %d seeks" % (key, seek_count))
-            return None
-        else:
-            children = children_line.rstrip().split(',')
-
-            if keys is None:
-                keys = keys_line.rstrip().split(',')
+        # ========
+        if children:
 
             # This node is NOT a leaf, keep searching
             # seek to the line number of the next node
             node_index = bisect.bisect_right(keys, key)
             child_node_line_number = int(children[node_index])
 
-            fh.seek(child_node_line_number * line_width)
-            seek_count += 1
+            line_number = child_node_line_number * line_width
+
+        # If children is empty then we are a leaf node and our search is done, return None
+        else:
+            #log.info("key %s is NOT in the tree, took %d seeks, avoided %d seeks" % (key, seek_count, avoided_seek_count))
+            return (cache, None)
 
         depth += 1
 
-    return None
+    raise Exception("we should not be here")
 
 
 class BTreeNode(object):
@@ -625,7 +588,10 @@ class BTree(object):
         line_number_to_children = {}
         line_number = 0
 
-        # Create a BTreeNode object for each line in the file...there is one node per line
+        # Create a BTreeNode object for each node in the file. A node is written over three lines:
+        # - keys
+        # - children
+        # - values
         with open(filename, 'rb') as fh:
 
             while True:
@@ -636,6 +602,7 @@ class BTree(object):
                 except StopIteration:
                     break
 
+                # Read in the three lines for this node
                 keys_line = keys_line.decode('utf-8').rstrip()
                 children_line = children_line.decode('utf-8').rstrip()
                 values_line = values_line.decode('utf-8').rstrip()
@@ -652,6 +619,9 @@ class BTree(object):
                 node.key_count = len(node.keys)
                 node.line_number = line_number
 
+                if self.root is None:
+                    self.root = node
+
                 line_number_to_children[line_number] = node
                 line_number += 3
 
@@ -663,11 +633,7 @@ class BTree(object):
             for (index, line_number_child_node) in enumerate(node.children):
                 child_node = line_number_to_children[line_number_child_node]
                 child_node.parent = node
-
                 node.children[index] = child_node
-
-        # Populate self.root
-        self.root = line_number_to_children[0]
 
         # Populate the depth for all children
         self.set_depth(self.root, 0)
@@ -750,6 +716,7 @@ class TestBTree(unittest.TestCase):
         Just test that this doesn't crash
         """
         self.btree.ascii()
+        #print(self.btree.ascii())
 
     def test_stats(self):
         (node_count, key_count, max_depth) = self.btree.stats()
@@ -773,8 +740,31 @@ class TestBTree(unittest.TestCase):
 
         # Search for a key in a BTree that has been saved to disk
         with open('foo.btree', 'rb') as fh:
-            self.assertEqual(btree_disk_get(fh, '2'), 'a')
-            self.assertEqual(btree_disk_get(fh, '8'), 'e')
+            (cache, value) = btree_disk_get(fh, '2')
+            self.assertEqual(value, 'a')
+
+            (cache, value) = btree_disk_get(fh, '8')
+            self.assertEqual(value, 'e')
+
+    def test_disk_get_cache(self):
+        self.btree.disk_save("foo.btree")
+        #print('\n' + self.btree.ascii())
+
+        # Search for a key in a BTree that has been saved to disk
+        with open('foo.btree', 'rb') as fh:
+            cache = {}
+
+            (cache, value) = btree_disk_get(fh, '2', cache)
+            self.assertEqual(value, 'a')
+
+            (cache, value) = btree_disk_get(fh, '8', cache)
+            self.assertEqual(value, 'e')
+
+            (cache, value) = btree_disk_get(fh, '20', cache)
+            self.assertEqual(value, 'k')
+
+            (cache, value) = btree_disk_get(fh, '6', cache)
+            self.assertEqual(value, 'd')
 
     def test_random(self):
         """

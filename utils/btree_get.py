@@ -8,7 +8,7 @@ create a .btree file equivalent
 import logging
 import os
 import sys
-from btree import disk_get
+from btree import btree_disk_get
 
 
 # setup logging
@@ -32,6 +32,5 @@ if not os.path.isfile(btree_filename):
     sys.exit(1)
 
 with open(btree_filename, 'rb') as fh:
-    value = disk_get(fh, key)
-
-print(value)
+    (cache, value) = btree_disk_get(fh, key)
+    print(value)
